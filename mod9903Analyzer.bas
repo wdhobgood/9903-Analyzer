@@ -2,6 +2,13 @@ Attribute VB_Name = "mod9903Analyzer"
 Option Explicit
 
 ' ============================================================
+' 9903 Analyzer - mod9903Analyzer.bas
+' Version : 2026-03-23 (MFN/IEEPA/S301 duty breakdown + DC summary file)
+' Modified: 2026-03-23
+' Changes : Added Wrong/Correct MFN, IEEPA, S301 duty sub-columns (cols 14-16, 19-21)
+'           Added DC Summary output file (LoadACHData, GetDCName, WriteDCSummaryFile)
+'           Fixed LoadACHData variable name (eNum -> entryNum, reserved word conflict)
+' ============================================================
 ' 9903 Analyzer v5 � Full Ship-PC Analysis
 '   - Outputs ALL rows (not just reciprocal)
 '   - Streams detail to sheets during processing (low memory)
@@ -849,7 +856,7 @@ Private Sub LoadACHData()
     Dim arr As Variant
     Dim k As Long
     Dim i As Long
-    Dim eNum As String
+    Dim entryNum As String
     Dim achAmt As Double
 
     sheetNames(0) = "2025 ACH"
@@ -868,13 +875,13 @@ Private Sub LoadACHData()
         arr = wsACH.Range(wsACH.Cells(2, 1), wsACH.Cells(lastRow, 2)).Value
 
         For i = 1 To UBound(arr, 1)
-            eNum = Trim$(CStr(arr(i, 1)))
-            If Len(eNum) > 0 Then
+            entryNum = Trim$(CStr(arr(i, 1)))
+            If Len(entryNum) > 0 Then
                 achAmt = SafeDbl(arr(i, 2))
-                If dictACH.Exists(eNum) Then
-                    dictACH(eNum) = dictACH(eNum) + achAmt
+                If dictACH.Exists(entryNum) Then
+                    dictACH(entryNum) = dictACH(entryNum) + achAmt
                 Else
-                    dictACH.Add eNum, achAmt
+                    dictACH.Add entryNum, achAmt
                 End If
             End If
         Next i
