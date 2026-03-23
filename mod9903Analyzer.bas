@@ -20,6 +20,7 @@ Private Const MAX_DATA_ROWS As Long = 1048575
 ' --- Settings ---
 Private dictHTS        As Object   ' reciprocal HTS lookup (Settings Col A - IEEPA)
 Private dictS301       As Object   ' S301 HTS lookup (Settings Col B)
+Private dictACH        As Object   ' key=EntryNum, val=Double (ACH amount paid)
 Private gLog           As String
 
 ' --- Running totals ---
@@ -30,7 +31,9 @@ Private totalCorrectDuty As Double
 Private totalEVDiff    As Double
 Private totalDutyDiff  As Double
 
-' --- Per-entry aggregation: key=EntryID, val=Array(wrongEV, wrongDuty, correctEV, correctDuty, diffEV, diffDuty) ---
+' --- Per-entry aggregation ---
+' key=EntryID, val=Array(wrongEV, wrongDuty, correctEV, correctDuty, diffEV, diffDuty,
+'                        wrongMFNDuty, wrongIEEPADuty, correctMFNDuty, correctIEEPADuty)
 Private dictEntryAgg   As Object
 
 ' --- Log for non-reciprocal 98/99 with value > 0 ---
@@ -67,10 +70,12 @@ Public Sub Run_9903_Analyzer()
     gLog = vbNullString
     Set dictHTS = CreateObject("Scripting.Dictionary")
     Set dictS301 = CreateObject("Scripting.Dictionary")
+    Set dictACH = CreateObject("Scripting.Dictionary")
     Set dictEntryAgg = CreateObject("Scripting.Dictionary")
     Set colLog = New Collection
     dictHTS.CompareMode = vbTextCompare
     dictS301.CompareMode = vbTextCompare
+    dictACH.CompareMode = vbTextCompare
     dictEntryAgg.CompareMode = vbTextCompare
 
     totalWrongEV = 0#: totalWrongDuty = 0#
@@ -87,6 +92,7 @@ Public Sub Run_9903_Analyzer()
     ' 1 ï¿½ load reciprocal HTS from Settings
     frm.UpdateStatus "Loading Settings...", 0
     LoadReciprocalHTS
+    LoadACHData
     If dictHTS.Count = 0 Then
         gLog = gLog & "No HTS codes found in Settings sheet." & vbNewLine
         GoTo Finish
@@ -199,6 +205,10 @@ Public Sub Run_9903_Analyzer()
     Application.DisplayAlerts = True
     wbOut.Close False
 
+    ' 10 – write DC summary file
+    frm.UpdateStatus "Writing DC Summary...", 98
+    WriteDCSummaryFile
+
     frm.UpdateStatus "Complete!", 100
     Application.Wait Now + TimeSerial(0, 0, 1)
 
@@ -231,6 +241,7 @@ Finish:
 
     Set dictHTS = Nothing
     Set dictS301 = Nothing
+    Set dictACH = Nothing
     Set dictEntryAgg = Nothing
     Set colLog = Nothing
     Exit Sub
@@ -246,6 +257,7 @@ SafeExit:
     MsgBox "Fatal error: " & errMsg, vbCritical, "9903 Analyzer"
     Set dictHTS = Nothing
     Set dictS301 = Nothing
+    Set dictACH = Nothing
     Set dictEntryAgg = Nothing
     Set colLog = Nothing
 End Sub
@@ -390,7 +402,9 @@ End Sub
 ' ================================================================
 Private Sub AccumulateEntry(entryID As String, lnWrongEV As Double, lnWrongDuty As Double, _
                             lnCorrectEV As Double, lnCorrectDuty As Double, _
-                            lnEVDiff As Double, lnDutyDiff As Double)
+                            lnEVDiff As Double, lnDutyDiff As Double, _
+                            lnWrongMFNDuty As Double, lnWrongIEEPADuty As Double, _
+                            lnCorrectMFNDuty As Double, lnCorrectIEEPADuty As Double)
     If dictEntryAgg.Exists(entryID) Then
         Dim ex As Variant: ex = dictEntryAgg(entryID)
         ex(0) = ex(0) + lnWrongEV
@@ -399,9 +413,16 @@ Private Sub AccumulateEntry(entryID As String, lnWrongEV As Double, lnWrongDuty 
         ex(3) = ex(3) + lnCorrectDuty
         ex(4) = ex(4) + lnEVDiff
         ex(5) = ex(5) + lnDutyDiff
+        ex(6) = ex(6) + lnWrongMFNDuty
+        ex(7) = ex(7) + lnWrongIEEPADuty
+        ex(8) = ex(8) + lnCorrectMFNDuty
+        ex(9) = ex(9) + lnCorrectIEEPADuty
         dictEntryAgg(entryID) = ex
     Else
-        dictEntryAgg.Add entryID, Array(lnWrongEV, lnWrongDuty, lnCorrectEV, lnCorrectDuty, lnEVDiff, lnDutyDiff)
+        dictEntryAgg.Add entryID, Array(lnWrongEV, lnWrongDuty, lnCorrectEV, lnCorrectDuty, _
+                                        lnEVDiff, lnDutyDiff, _
+                                        lnWrongMFNDuty, lnWrongIEEPADuty, _
+                                        lnCorrectMFNDuty, lnCorrectIEEPADuty)
     End If
 End Sub
 
@@ -628,7 +649,9 @@ NextSeq:
         totalDutyDiff = totalDutyDiff + lnDutyDiff
 
         ' --- accumulate per-entry ---
-        AccumulateEntry entryID, lnWrongEV, lnWrongDuty, lnCorrectEV, lnCorrectDuty, lnEVDiff, lnDutyDiff
+        AccumulateEntry entryID, lnWrongEV, lnWrongDuty, lnCorrectEV, lnCorrectDuty, _
+                        lnEVDiff, lnDutyDiff, _
+                        lnWrongMFNDuty, lnWrongIEEPADuty, lnCorrectMFNDuty, lnCorrectIEEPADuty
 
         ' --- build detail row and stream to sheet ---
         Dim rowArr(1 To 24) As Variant
@@ -814,5 +837,251 @@ Private Sub FormatDetailSheet(ws As Worksheet)
     ws.Columns("I:I").NumberFormat = "#,##0"
     ws.Columns("M:X").NumberFormat = "#,##0.00"
     ws.Columns.AutoFit
+End Sub
+
+' ================================================================
+'  LOAD ACH PAYMENT DATA FROM 2025 ACH / 2026 ACH SHEETS
+' ================================================================
+Private Sub LoadACHData()
+    Dim sheetNames(1) As String
+    sheetNames(0) = "2025 ACH"
+    sheetNames(1) = "2026 ACH"
+
+    Dim k As Long
+    For k = 0 To 1
+        Dim wsACH As Worksheet
+        Set wsACH = Nothing
+        On Error Resume Next
+        Set wsACH = ThisWorkbook.Sheets(sheetNames(k))
+        On Error GoTo 0
+        If wsACH Is Nothing Then GoTo NextACHSheet
+
+        Dim lastRow As Long
+        lastRow = wsACH.Cells(wsACH.Rows.Count, 1).End(xlUp).Row
+        If lastRow < 2 Then GoTo NextACHSheet  ' header only or empty
+
+        Dim arr As Variant
+        arr = wsACH.Range(wsACH.Cells(2, 1), wsACH.Cells(lastRow, 2)).Value
+
+        Dim i As Long
+        For i = 1 To UBound(arr, 1)
+            Dim eNum As String: eNum = Trim$(CStr(arr(i, 1)))
+            If Len(eNum) > 0 Then
+                Dim achAmt As Double: achAmt = SafeDbl(arr(i, 2))
+                If dictACH.Exists(eNum) Then
+                    dictACH(eNum) = dictACH(eNum) + achAmt
+                Else
+                    dictACH.Add eNum, achAmt
+                End If
+            End If
+        Next i
+
+NextACHSheet:
+    Next k
+End Sub
+
+' ================================================================
+'  RESOLVE DC NAME FROM ENTRY NUMBER PREFIX
+' ================================================================
+Private Function GetDCName(entryID As String) As String
+    Dim prefix As String: prefix = Left$(entryID, 8)
+    Select Case UCase$(prefix)
+        Case "CDK-4000": GetDCName = "Mocksville"
+        Case "CDK-6000": GetDCName = "El Paso"
+        Case "CDK-1100": GetDCName = "Seminole"
+        Case "CDK-2000": GetDCName = "Hackleburg"
+        Case Else:        GetDCName = "Unknown (" & prefix & ")"
+    End Select
+End Function
+
+' ================================================================
+'  WRITE DC SUMMARY FILE
+'  Section 1: per-DC totals
+'  Section 2: per-entry detail with ACH reconciliation
+' ================================================================
+Private Sub WriteDCSummaryFile()
+    ' --- build per-DC aggregation from dictEntryAgg ---
+    ' dc array indices: 0=wrongEV, 1=correctEV, 2=wrongMFN, 3=correctMFN,
+    '                   4=wrongIEEPA, 5=correctIEEPA, 6=wrongDuty, 7=correctDuty, 8=dutyDiff
+    Dim dictDCAgg As Object
+    Set dictDCAgg = CreateObject("Scripting.Dictionary")
+    dictDCAgg.CompareMode = vbTextCompare
+
+    Dim eKeys As Variant: eKeys = dictEntryAgg.keys
+    Dim i As Long
+    For i = 0 To dictEntryAgg.Count - 1
+        Dim eID As String: eID = eKeys(i)
+        Dim eAgg As Variant: eAgg = dictEntryAgg(eID)
+        Dim dcNm As String: dcNm = GetDCName(eID)
+
+        If dictDCAgg.Exists(dcNm) Then
+            Dim dcArr As Variant: dcArr = dictDCAgg(dcNm)
+            dcArr(0) = dcArr(0) + eAgg(0)   ' wrongEV
+            dcArr(1) = dcArr(1) + eAgg(2)   ' correctEV
+            dcArr(2) = dcArr(2) + eAgg(6)   ' wrongMFN
+            dcArr(3) = dcArr(3) + eAgg(8)   ' correctMFN
+            dcArr(4) = dcArr(4) + eAgg(7)   ' wrongIEEPA
+            dcArr(5) = dcArr(5) + eAgg(9)   ' correctIEEPA
+            dcArr(6) = dcArr(6) + eAgg(1)   ' wrongDuty
+            dcArr(7) = dcArr(7) + eAgg(3)   ' correctDuty
+            dcArr(8) = dcArr(8) + eAgg(5)   ' dutyDiff
+            dictDCAgg(dcNm) = dcArr
+        Else
+            dictDCAgg.Add dcNm, Array(eAgg(0), eAgg(2), eAgg(6), eAgg(8), _
+                                      eAgg(7), eAgg(9), eAgg(1), eAgg(3), eAgg(5))
+        End If
+    Next i
+
+    ' --- create workbook ---
+    Dim wbS As Workbook
+    Set wbS = Workbooks.Add(xlWBATWorksheet)
+    Dim ws As Worksheet
+    Set ws = wbS.Sheets(1)
+    ws.Name = "DC Summary"
+
+    ' ----------------------------------------------------------------
+    '  SECTION 1 : DC Summary
+    ' ----------------------------------------------------------------
+    ws.Cells(1, 1).Value = "DC Summary"
+    ws.Cells(1, 1).Font.Bold = True
+    ws.Cells(1, 1).Font.Size = 13
+
+    Dim dcHdrRow As Long: dcHdrRow = 2
+    Dim dcHdr As Variant
+    dcHdr = Array("DC Name", "Total Wrong Value", "Total Correct Value", _
+                  "Wrong MFN Duty", "Correct MFN Duty", _
+                  "Wrong IEEPA Duty", "Correct IEEPA Duty", _
+                  "Total Wrong Duty", "Total Correct Duty", "Total Duty Difference")
+    Dim c As Long
+    For c = 0 To UBound(dcHdr)
+        ws.Cells(dcHdrRow, c + 1).Value = dcHdr(c)
+    Next c
+    ws.Rows(dcHdrRow).Font.Bold = True
+
+    Dim dcDataStart As Long: dcDataStart = dcHdrRow + 1
+    Dim dcCount As Long: dcCount = dictDCAgg.Count
+    Dim dcKeys As Variant: dcKeys = dictDCAgg.keys
+
+    ' grand totals accumulators for DC section totals row
+    Dim gtWrongEV As Double, gtCorrectEV As Double
+    Dim gtWrongMFN As Double, gtCorrectMFN As Double
+    Dim gtWrongIEEPA As Double, gtCorrectIEEPA As Double
+    Dim gtWrongDuty As Double, gtCorrectDuty As Double
+    Dim gtDutyDiff As Double
+
+    Dim r As Long
+    For r = 0 To dcCount - 1
+        Dim dn As String: dn = dcKeys(r)
+        Dim da As Variant: da = dictDCAgg(dn)
+        ws.Cells(dcDataStart + r, 1).Value = dn
+        ws.Cells(dcDataStart + r, 2).Value = da(0)
+        ws.Cells(dcDataStart + r, 3).Value = da(1)
+        ws.Cells(dcDataStart + r, 4).Value = da(2)
+        ws.Cells(dcDataStart + r, 5).Value = da(3)
+        ws.Cells(dcDataStart + r, 6).Value = da(4)
+        ws.Cells(dcDataStart + r, 7).Value = da(5)
+        ws.Cells(dcDataStart + r, 8).Value = da(6)
+        ws.Cells(dcDataStart + r, 9).Value = da(7)
+        ws.Cells(dcDataStart + r, 10).Value = da(8)
+        gtWrongEV    = gtWrongEV    + da(0)
+        gtCorrectEV  = gtCorrectEV  + da(1)
+        gtWrongMFN   = gtWrongMFN   + da(2)
+        gtCorrectMFN = gtCorrectMFN + da(3)
+        gtWrongIEEPA  = gtWrongIEEPA  + da(4)
+        gtCorrectIEEPA = gtCorrectIEEPA + da(5)
+        gtWrongDuty  = gtWrongDuty  + da(6)
+        gtCorrectDuty = gtCorrectDuty + da(7)
+        gtDutyDiff   = gtDutyDiff   + da(8)
+    Next r
+
+    ' DC totals row
+    Dim dcTotRow As Long: dcTotRow = dcDataStart + dcCount
+    ws.Cells(dcTotRow, 1).Value = "TOTAL"
+    ws.Cells(dcTotRow, 2).Value = gtWrongEV
+    ws.Cells(dcTotRow, 3).Value = gtCorrectEV
+    ws.Cells(dcTotRow, 4).Value = gtWrongMFN
+    ws.Cells(dcTotRow, 5).Value = gtCorrectMFN
+    ws.Cells(dcTotRow, 6).Value = gtWrongIEEPA
+    ws.Cells(dcTotRow, 7).Value = gtCorrectIEEPA
+    ws.Cells(dcTotRow, 8).Value = gtWrongDuty
+    ws.Cells(dcTotRow, 9).Value = gtCorrectDuty
+    ws.Cells(dcTotRow, 10).Value = gtDutyDiff
+    ws.Rows(dcTotRow).Font.Bold = True
+
+    ' format DC numeric columns
+    If dcCount > 0 Then
+        ws.Range(ws.Cells(dcDataStart, 2), ws.Cells(dcTotRow, 10)).NumberFormat = "#,##0.00"
+    End If
+
+    ' ----------------------------------------------------------------
+    '  SECTION 2 : Per-Entry Summary
+    ' ----------------------------------------------------------------
+    Dim entrySectRow As Long: entrySectRow = dcTotRow + 3
+    ws.Cells(entrySectRow, 1).Value = "Per-Entry Summary"
+    ws.Cells(entrySectRow, 1).Font.Bold = True
+    ws.Cells(entrySectRow, 1).Font.Size = 12
+
+    Dim entryHdrRow As Long: entryHdrRow = entrySectRow + 1
+    Dim entryHdr As Variant
+    entryHdr = Array("Entry Number", "DC", _
+                     "Total Wrong EV", "Total Wrong MFN Duty", "Total Wrong IEEPA Duty", "Total Wrong Duty", _
+                     "Total Correct EV", "Total Correct MFN Duty", "Total Correct IEEPA Duty", "Total Correct Duty", _
+                     "Total Diff EV", "Total Diff Duty", _
+                     "Total ACH Payment", "Diff in ACH Payment")
+    For c = 0 To UBound(entryHdr)
+        ws.Cells(entryHdrRow, c + 1).Value = entryHdr(c)
+    Next c
+    ws.Rows(entryHdrRow).Font.Bold = True
+
+    Dim entryCount As Long: entryCount = dictEntryAgg.Count
+    Dim entryDataRow As Long: entryDataRow = entryHdrRow + 1
+
+    If entryCount > 0 Then
+        Dim outArr() As Variant
+        ReDim outArr(1 To entryCount, 1 To 14)
+        For i = 0 To entryCount - 1
+            Dim eid2 As String: eid2 = eKeys(i)
+            Dim ea As Variant: ea = dictEntryAgg(eid2)
+            Dim dc2 As String: dc2 = GetDCName(eid2)
+            Dim achPaid As Double
+            If dictACH.Exists(eid2) Then achPaid = dictACH(eid2) Else achPaid = 0#
+
+            outArr(i + 1, 1)  = eid2
+            outArr(i + 1, 2)  = dc2
+            outArr(i + 1, 3)  = ea(0)            ' wrongEV
+            outArr(i + 1, 4)  = ea(6)            ' wrongMFNDuty
+            outArr(i + 1, 5)  = ea(7)            ' wrongIEEPADuty
+            outArr(i + 1, 6)  = ea(1)            ' wrongDuty
+            outArr(i + 1, 7)  = ea(2)            ' correctEV
+            outArr(i + 1, 8)  = ea(8)            ' correctMFNDuty
+            outArr(i + 1, 9)  = ea(9)            ' correctIEEPADuty
+            outArr(i + 1, 10) = ea(3)            ' correctDuty
+            outArr(i + 1, 11) = ea(4)            ' diffEV
+            outArr(i + 1, 12) = ea(5)            ' diffDuty
+            outArr(i + 1, 13) = achPaid
+            outArr(i + 1, 14) = achPaid - ea(1)  ' achPaid - wrongDuty
+        Next i
+
+        ws.Range(ws.Cells(entryDataRow, 1), _
+                 ws.Cells(entryDataRow + entryCount - 1, 14)).Value = outArr
+        Erase outArr
+
+        ' format entry numeric columns (C:N = cols 3-14)
+        ws.Range(ws.Cells(entryDataRow, 3), _
+                 ws.Cells(entryDataRow + entryCount - 1, 14)).NumberFormat = "#,##0.00"
+    End If
+
+    ' auto-fit all columns
+    ws.Columns.AutoFit
+
+    ' --- save and close ---
+    Dim summName As String
+    summName = "9903_DC_Summary_" & gOutStamp & ".xlsx"
+    Application.DisplayAlerts = False
+    wbS.SaveAs OUTPUT_PATH & summName, xlOpenXMLWorkbook
+    Application.DisplayAlerts = True
+    wbS.Close False
+
+    Set dictDCAgg = Nothing
 End Sub
 
