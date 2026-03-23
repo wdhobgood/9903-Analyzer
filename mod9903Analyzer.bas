@@ -2,7 +2,7 @@ Attribute VB_Name = "mod9903Analyzer"
 Option Explicit
 
 ' ============================================================
-' 9903 Analyzer v5 — Full Ship-PC Analysis
+' 9903 Analyzer v5 ï¿½ Full Ship-PC Analysis
 '   - Outputs ALL rows (not just reciprocal)
 '   - Streams detail to sheets during processing (low memory)
 '   - Per-entry aggregation on Summary
@@ -13,12 +13,13 @@ Private Const SHIPPC_PATH  As String = "C:\Data\9903 Analyzer\Input Reports\Ship
 Private Const ARCHIVE_PATH As String = "C:\Data\9903 Analyzer\Input Reports\Ship-PC\Archive\"
 Private Const OUTPUT_PATH  As String = "C:\Data\9903 Analyzer\Output Reports\"
 
-Private Const DETAIL_COLS  As Long = 18
+Private Const DETAIL_COLS  As Long = 24
 Private Const CHUNK_SIZE   As Long = 50000
 Private Const MAX_DATA_ROWS As Long = 1048575
 
 ' --- Settings ---
-Private dictHTS        As Object   ' reciprocal HTS lookup
+Private dictHTS        As Object   ' reciprocal HTS lookup (Settings Col A - IEEPA)
+Private dictS301       As Object   ' S301 HTS lookup (Settings Col B)
 Private gLog           As String
 
 ' --- Running totals ---
@@ -38,7 +39,7 @@ Private colLog         As Collection   ' each item = Array(entry, hts, mid, note
 ' --- Streaming detail write state ---
 Private wsDetail       As Worksheet    ' current detail sheet
 Private wbDetail       As Workbook     ' current detail workbook (main or overflow)
-Private wbMainOut      As Workbook     ' primary output wb — never close during overflow
+Private wbMainOut      As Workbook     ' primary output wb ï¿½ never close during overflow
 Private detailWsRow    As Long         ' next row to write
 Private detailRowsInFile As Long       ' data rows in current file
 Private detailFileNum  As Long         ' file counter
@@ -65,9 +66,11 @@ Public Sub Run_9903_Analyzer()
 
     gLog = vbNullString
     Set dictHTS = CreateObject("Scripting.Dictionary")
+    Set dictS301 = CreateObject("Scripting.Dictionary")
     Set dictEntryAgg = CreateObject("Scripting.Dictionary")
     Set colLog = New Collection
     dictHTS.CompareMode = vbTextCompare
+    dictS301.CompareMode = vbTextCompare
     dictEntryAgg.CompareMode = vbTextCompare
 
     totalWrongEV = 0#: totalWrongDuty = 0#
@@ -81,7 +84,7 @@ Public Sub Run_9903_Analyzer()
     frm.Show vbModeless
     DoEvents
 
-    ' 1 — load reciprocal HTS from Settings
+    ' 1 ï¿½ load reciprocal HTS from Settings
     frm.UpdateStatus "Loading Settings...", 0
     LoadReciprocalHTS
     If dictHTS.Count = 0 Then
@@ -89,7 +92,7 @@ Public Sub Run_9903_Analyzer()
         GoTo Finish
     End If
 
-    ' 2 — collect Ship-PC files
+    ' 2 ï¿½ collect Ship-PC files
     Dim fso As Object
     Set fso = CreateObject("Scripting.FileSystemObject")
 
@@ -117,7 +120,7 @@ Public Sub Run_9903_Analyzer()
         GoTo Finish
     End If
 
-    ' 3 — create main output workbook and first Detail sheet
+    ' 3 ï¿½ create main output workbook and first Detail sheet
     gOutStamp = Format$(Now, "YYYYMMDD\_HHMM")
 
     Dim wbOut As Workbook
@@ -134,7 +137,7 @@ Public Sub Run_9903_Analyzer()
     detailRowsInFile = 0
     chunkPos = 0
 
-    ' 4 — process each Ship-PC then archive
+    ' 4 ï¿½ process each Ship-PC then archive
     Dim i As Long
     For i = 1 To totalFiles
         Dim fp As String, fn As String
@@ -151,13 +154,13 @@ Public Sub Run_9903_Analyzer()
         If fso.FileExists(ARCHIVE_PATH & fn) Then fso.DeleteFile ARCHIVE_PATH & fn, True
         fso.MoveFile fp, ARCHIVE_PATH & fn
         If Err.Number <> 0 Then
-            gLog = gLog & "Archive failed: " & fn & " — " & Err.Description & vbNewLine
+            gLog = gLog & "Archive failed: " & fn & " ï¿½ " & Err.Description & vbNewLine
             Err.Clear
         End If
         On Error GoTo SafeExit
     Next i
 
-    ' 5 — flush any remaining chunk
+    ' 5 ï¿½ flush any remaining chunk
     FlushChunk
     FormatDetailSheet wsDetail
 
@@ -170,14 +173,14 @@ Public Sub Run_9903_Analyzer()
         Set wbDetail = Nothing
     End If
 
-    ' 6 — write Summary (into main workbook)
+    ' 6 ï¿½ write Summary (into main workbook)
     frm.UpdateStatus "Writing Summary...", CLng((totalFiles / (totalFiles + 1)) * 100)
     WriteSummary wbOut
 
-    ' 7 — write Log sheet if any
+    ' 7 ï¿½ write Log sheet if any
     If colLog.Count > 0 Then WriteLog wbOut
 
-    ' 8 — delete default blank sheets
+    ' 8 ï¿½ delete default blank sheets
     On Error Resume Next
     Application.DisplayAlerts = False
     Dim wsTemp As Worksheet
@@ -187,7 +190,7 @@ Public Sub Run_9903_Analyzer()
     Application.DisplayAlerts = True
     On Error GoTo SafeExit
 
-    ' 9 — save main workbook
+    ' 9 ï¿½ save main workbook
     Dim outName As String
     outName = "9903_Output_" & gOutStamp & ".xlsx"
 
@@ -227,6 +230,7 @@ Finish:
     End If
 
     Set dictHTS = Nothing
+    Set dictS301 = Nothing
     Set dictEntryAgg = Nothing
     Set colLog = Nothing
     Exit Sub
@@ -241,6 +245,7 @@ SafeExit:
     Application.ScreenUpdating = True
     MsgBox "Fatal error: " & errMsg, vbCritical, "9903 Analyzer"
     Set dictHTS = Nothing
+    Set dictS301 = Nothing
     Set dictEntryAgg = Nothing
     Set colLog = Nothing
 End Sub
@@ -276,6 +281,24 @@ Private Sub LoadReciprocalHTS()
             If Not dictHTS.Exists(htsVal) Then dictHTS.Add htsVal, 1
         End If
     Next i
+
+    ' Load S301 HTS codes from Settings Column B
+    Dim lastRowB As Long
+    lastRowB = ws.Cells(ws.Rows.Count, 2).End(xlUp).Row
+    If lastRowB >= 1 Then
+        Dim arrB As Variant
+        If lastRowB = 1 Then
+            ReDim arrB(1 To 1, 1 To 1): arrB(1, 1) = ws.Cells(1, 2).Value
+        Else
+            arrB = ws.Range(ws.Cells(1, 2), ws.Cells(lastRowB, 2)).Value
+        End If
+        For i = LBound(arrB, 1) To UBound(arrB, 1)
+            htsVal = Trim$(CStr(arrB(i, 1)))
+            If Len(htsVal) > 0 Then
+                If Not dictS301.Exists(htsVal) Then dictS301.Add htsVal, 1
+            End If
+        Next i
+    End If
 End Sub
 
 ' ================================================================
@@ -290,7 +313,7 @@ Private Function SafeCol(data As Variant, rowIdx As Long, colIdx As Long) As Var
 End Function
 
 ' ================================================================
-'  DETAIL STREAMING — flush chunk buffer to worksheet
+'  DETAIL STREAMING ï¿½ flush chunk buffer to worksheet
 ' ================================================================
 Private Sub FlushChunk()
     If chunkPos = 0 Then Exit Sub
@@ -313,7 +336,7 @@ Private Sub FlushChunk()
 End Sub
 
 ' ================================================================
-'  DETAIL STREAMING — add one row, handle overflow
+'  DETAIL STREAMING ï¿½ add one row, handle overflow
 ' ================================================================
 Private Sub AddDetailRow(rowArr() As Variant)
     ' check if current file is full
@@ -383,7 +406,7 @@ Private Sub AccumulateEntry(entryID As String, lnWrongEV As Double, lnWrongDuty 
 End Sub
 
 ' ================================================================
-'  PROCESS ONE SHIP-PC FILE — ALL rows
+'  PROCESS ONE SHIP-PC FILE ï¿½ ALL rows
 ' ================================================================
 Private Sub ProcessShipPC(filePath As String)
     Dim wbSrc As Workbook
@@ -496,6 +519,8 @@ Private Sub ProcessShipPC(filePath As String)
         ' reciprocal/tariff accumulators
         Dim sumRecipVal As Double: sumRecipVal = 0#
         Dim sumRecipRate As Double: sumRecipRate = 0#
+        Dim sumIEEPARate As Double: sumIEEPARate = 0#
+        Dim sumS301Rate As Double: sumS301Rate = 0#
         Dim recipHTS1 As String: recipHTS1 = vbNullString
         Dim recipHTS2 As String: recipHTS2 = vbNullString
 
@@ -510,18 +535,22 @@ Private Sub ProcessShipPC(filePath As String)
             If Len(hStr) = 0 Then GoTo NextSeq
 
             If dictHTS.Exists(hStr) Then
-                ' known reciprocal from Settings
+                ' known reciprocal from Settings Column A (IEEPA)
                 recipCount = recipCount + 1
                 sumRecipVal = sumRecipVal + SafeDbl(data(i, seqValCol(s)))
                 sumRecipRate = sumRecipRate + SafeDbl(data(i, seqRateCol(s)))
+                sumIEEPARate = sumIEEPARate + SafeDbl(data(i, seqRateCol(s)))
                 If recipCount = 1 Then recipHTS1 = hStr
                 If recipCount = 2 Then recipHTS2 = hStr
 
             ElseIf Left$(hStr, 2) = "99" Or Left$(hStr, 2) = "98" Then
-                ' other tariff provision (S301, etc.) — treat as tariff, not merchandise
+                ' other tariff provision (S301, etc.) ï¿½ treat as tariff, not merchandise
                 tariffCount = tariffCount + 1
                 sumRecipVal = sumRecipVal + SafeDbl(data(i, seqValCol(s)))
                 sumRecipRate = sumRecipRate + SafeDbl(data(i, seqRateCol(s)))
+                If dictS301.Exists(hStr) Then
+                    sumS301Rate = sumS301Rate + SafeDbl(data(i, seqRateCol(s)))
+                End If
                 ' store in recipHTS slots if empty
                 If recipCount + tariffCount = 1 Then recipHTS1 = hStr
                 If recipCount + tariffCount = 2 Then recipHTS2 = hStr
@@ -566,7 +595,7 @@ NextSeq:
         ' WrongDuty = WrongEV * (sumRecipRate + mfnRate)
         ' CorrectEV = MFN value only
         ' CorrectDuty = MFN value * (sumRecipRate + mfnRate)
-        ' The rates still apply — only the entered value was wrong
+        ' The rates still apply ï¿½ only the entered value was wrong
         Dim totalVal As Double:    totalVal = sumRecipVal + mfnVal
         Dim totalRate As Double:   totalRate = sumRecipRate + mfnRate
 
@@ -582,6 +611,14 @@ NextSeq:
         Dim lnEVDiff As Double:      lnEVDiff = lnWrongEV - lnCorrectEV
         Dim lnDutyDiff As Double:    lnDutyDiff = lnWrongDuty - lnCorrectDuty
 
+        ' --- duty component breakdowns ---
+        Dim lnWrongMFNDuty As Double:     lnWrongMFNDuty = txnQty * totalVal * mfnRate
+        Dim lnWrongIEEPADuty As Double:   lnWrongIEEPADuty = txnQty * totalVal * sumIEEPARate
+        Dim lnWrongS301Duty As Double:    lnWrongS301Duty = txnQty * totalVal * sumS301Rate
+        Dim lnCorrectMFNDuty As Double:   lnCorrectMFNDuty = txnQty * mfnVal * mfnRate
+        Dim lnCorrectIEEPADuty As Double: lnCorrectIEEPADuty = txnQty * mfnVal * sumIEEPARate
+        Dim lnCorrectS301Duty As Double:  lnCorrectS301Duty = txnQty * mfnVal * sumS301Rate
+
         ' --- accumulate totals ---
         totalWrongEV = totalWrongEV + lnWrongEV
         totalWrongDuty = totalWrongDuty + lnWrongDuty
@@ -594,7 +631,7 @@ NextSeq:
         AccumulateEntry entryID, lnWrongEV, lnWrongDuty, lnCorrectEV, lnCorrectDuty, lnEVDiff, lnDutyDiff
 
         ' --- build detail row and stream to sheet ---
-        Dim rowArr(1 To 18) As Variant
+        Dim rowArr(1 To 24) As Variant
         rowArr(1) = entryID
         rowArr(2) = SafeCol(data, i, cReceiptDocID)
         rowArr(3) = SafeCol(data, i, cTxnDate)
@@ -608,11 +645,17 @@ NextSeq:
         rowArr(11) = recipHTS2
         rowArr(12) = mfnHTSStr
         rowArr(13) = lnWrongEV
-        rowArr(14) = lnWrongDuty
-        rowArr(15) = lnCorrectEV
-        rowArr(16) = lnCorrectDuty
-        rowArr(17) = lnEVDiff
-        rowArr(18) = lnDutyDiff
+        rowArr(14) = lnWrongMFNDuty
+        rowArr(15) = lnWrongIEEPADuty
+        rowArr(16) = lnWrongS301Duty
+        rowArr(17) = lnWrongDuty
+        rowArr(18) = lnCorrectEV
+        rowArr(19) = lnCorrectMFNDuty
+        rowArr(20) = lnCorrectIEEPADuty
+        rowArr(21) = lnCorrectS301Duty
+        rowArr(22) = lnCorrectDuty
+        rowArr(23) = lnEVDiff
+        rowArr(24) = lnDutyDiff
 
         AddDetailRow rowArr
 
@@ -629,7 +672,7 @@ Private Sub WriteSummary(wbOut As Workbook)
     ws.Name = "Summary"
 
     ' --- SECTION 1: Grand totals ---
-    ws.Cells(1, 1).Value = "9903 Reciprocal Tariff Analysis — Summary"
+    ws.Cells(1, 1).Value = "9903 Reciprocal Tariff Analysis ï¿½ Summary"
     ws.Cells(1, 1).Font.Bold = True
     ws.Cells(1, 1).Font.Size = 13
 
@@ -756,7 +799,8 @@ Private Sub WriteDetailHeaders(ws As Worksheet)
     hdr = Array("Entry Number", "ReceiptDocID", "TxnDate", "Receipt Date", _
                 "Material Number", "OrderNumReceipt", "MID", "CountryOfOrigin", _
                 "TxnQty", "Reciprocal HTS 1", "Reciprocal HTS 2", "MFN HTS", _
-                "Wrong EV", "Wrong Duty", "Correct EV", "Correct Duty", _
+                "Wrong EV", "Wrong MFN Duty", "Wrong IEEPA Duty", "Wrong S301 Duty", "Wrong Duty", _
+                "Correct EV", "Correct MFN Duty", "Correct IEEPA Duty", "Correct S301 Duty", "Correct Duty", _
                 "EV Difference", "Duty Difference")
     Dim c As Long
     For c = 0 To UBound(hdr)
@@ -768,7 +812,7 @@ End Sub
 Private Sub FormatDetailSheet(ws As Worksheet)
     ws.Columns("C:D").NumberFormat = "MM/DD/YYYY"
     ws.Columns("I:I").NumberFormat = "#,##0"
-    ws.Columns("M:R").NumberFormat = "#,##0.00"
+    ws.Columns("M:X").NumberFormat = "#,##0.00"
     ws.Columns.AutoFit
 End Sub
 
